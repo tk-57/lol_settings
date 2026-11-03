@@ -4,7 +4,7 @@ LoLのゲーム設定・キー設定を保存して、別のアカウントに�
 
 ## ダウンロード
 
-[ダウンロードページ](https://github.com/tk-57/lol-settings/releases)の `LoLSettings.exe` をダウンロードして起動してください。
+[ダウンロードページ](https://github.com/tk-57/lol_settings/releases)の `LoLSettings.exe` をダウンロードして起動してください。
 
 ## 使い方
 
