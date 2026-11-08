@@ -8,6 +8,9 @@ import (
 
 func compatible(a, b any) bool {
 	switch a.(type) {
+	case nil:
+		// Preserve null in snapshots without guessing a type for PATCH requests.
+		return b == nil
 	case bool:
 		_, ok := b.(bool)
 		return ok
@@ -46,11 +49,15 @@ type Plan struct {
 // MakePlan excludes missing keys and incompatible value types.
 func MakePlan(source, current *Profile) *Plan {
 	p := &Plan{}
-	merge := func(label string, src, dst Settings) Settings {
+	merge := func(label string, src, dst Settings, input bool) Settings {
 		out := Settings{}
 		for section, entries := range src {
 			for key, v := range entries {
 				old, ok := dst[section][key]
+				if input {
+					v = InputValue(section, v)
+					old = InputValue(section, old)
+				}
 				if !ok || !compatible(v, old) {
 					p.Skipped = append(p.Skipped, label+" / "+section+"."+key)
 					continue
@@ -67,8 +74,8 @@ func MakePlan(source, current *Profile) *Plan {
 		}
 		return out
 	}
-	p.Game = merge("ゲーム", source.Game, current.Game)
-	p.Input = merge("キー", source.Input, current.Input)
+	p.Game = merge("ゲーム", source.Game, current.Game, false)
+	p.Input = merge("キー", source.Input, current.Input, true)
 	sort.Strings(p.Skipped)
 	return p
 }

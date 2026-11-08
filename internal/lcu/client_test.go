@@ -35,10 +35,12 @@ type mockLCU struct {
 	account, phase         string
 	patches                []string
 	failInput, ignorePatch bool
+	voice                  map[string]any
 }
 
 func fixture(t *testing.T) (*Client, *mockLCU, Account, *profile.Profile) {
 	m := &mockLCU{t: t, game: profile.Settings{"General": {"volume": json.Number("10")}}, input: profile.Settings{"Keys": {"q": "[q]"}}, account: "account-a", phase: "None"}
+	m.voice = map[string]any{"pushToTalkKey": "[c]", "pushToTalkTeamKey": "[<Unbound>]", "autoJoin": true, "muteOnConnect": true}
 	c := &Client{credentials: credentials{123, 12345, "test-secret"}, http: &http.Client{Transport: roundTripFunc(m.respond)}}
 	source := &profile.Profile{Game: profile.Settings{"General": {"volume": json.Number("20")}}, Input: profile.Settings{"Keys": {"q": "[w]"}}}
 	return c, m, Account{PUUID: "account-a", GameName: "Player", TagLine: "JP1"}, source
@@ -58,7 +60,21 @@ func (m *mockLCU) respond(r *http.Request) (*http.Response, error) {
 	path := r.URL.Path
 	if r.Method == "PATCH" {
 		m.patches = append(m.patches, path)
-		if path == inputEndpoint && m.failInput {
+		if path == voiceEndpoint {
+			var preferences voicePreferences
+			if err := json.NewDecoder(r.Body).Decode(&preferences); err != nil || preferences.SchemaVersion != 1 {
+				m.t.Fatal("invalid voice preference update", err)
+			}
+			for field, value := range preferences.Data {
+				if field != "pushToTalkKey" && field != "pushToTalkTeamKey" {
+					m.t.Fatal("unexpected voice setting update", field)
+				}
+				if !m.ignorePatch {
+					m.voice[field] = value
+				}
+			}
+			status = 204
+		} else if path == inputEndpoint && m.failInput {
 			status = 500
 			payload = map[string]string{"error": "simulated"}
 		} else {
@@ -90,6 +106,8 @@ func (m *mockLCU) respond(r *http.Request) (*http.Response, error) {
 			payload = m.game
 		case inputEndpoint:
 			payload = m.input
+		case voiceEndpoint:
+			payload = voicePreferences{SchemaVersion: 1, Data: m.voice}
 		default:
 			m.t.Fatal("unexpected path", path)
 		}
@@ -236,5 +254,41 @@ func TestLockfileRotationBlocksOperation(t *testing.T) {
 	}
 	if err = c.Apply(prepared); err == nil || len(m.patches) != 0 {
 		t.Fatal("rotated credentials accepted")
+	}
+}
+
+func TestSnapshotSaveAndApplyPreservePushToTalk(t *testing.T) {
+	c, m, a, _ := fixture(t)
+	m.input["GameEvents"] = map[string]any{"evtPushToTalk": nil, "evtPushToTalkTeam": nil}
+	p, err := c.Snapshot(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := profile.Save(path, p); err != nil {
+		t.Fatal(err)
+	}
+	p, err = profile.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"evtPushToTalk", "evtPushToTalkTeam"} {
+		if value, exists := p.Input["GameEvents"][key]; !exists || value != nil {
+			t.Fatalf("voice binding %s was lost", key)
+		}
+	}
+	m.input["Keys"]["q"] = "[w]"
+	prepared, err := c.Prepare(a, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Plan.Changed != 1 || len(prepared.Plan.Skipped) != 0 {
+		t.Fatalf("unexpected plan: %#v", prepared.Plan)
+	}
+	if err := c.Apply(prepared); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.patches) != 1 || m.patches[0] != inputEndpoint || m.input["Keys"]["q"] != "[q]" {
+		t.Fatal("binding was not restored")
 	}
 }

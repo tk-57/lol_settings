@@ -16,7 +16,7 @@ import (
 // MaxFileSize bounds both settings files and LCU responses to 4 MiB.
 const MaxFileSize = 4 << 20
 
-// Settings maps section names to scalar setting values.
+// Settings maps section names to scalar setting values, including null.
 type Settings map[string]map[string]any
 
 // Profile is the on-disk JSON format. It does not contain account credentials.
@@ -55,7 +55,7 @@ func DecodeSettings(raw json.RawMessage) (Settings, error) {
 				return nil, fmt.Errorf("空の設定名があります")
 			}
 			switch v.(type) {
-			case bool, string:
+			case nil, bool, string:
 			case json.Number:
 				if !validNumber(v.(json.Number)) {
 					return nil, fmt.Errorf("%s.%s の数値が範囲外です", section, key)
@@ -116,6 +116,9 @@ func Load(path string) (*Profile, error) {
 // Save writes through a temporary file in the destination directory.
 // A validation or write failure leaves the previous destination untouched.
 func Save(path string, p *Profile) error {
+	if p == nil {
+		return fmt.Errorf("保存する設定がありません")
+	}
 	b, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err

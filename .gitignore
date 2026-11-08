@@ -12,6 +12,8 @@
 
 # Exported settings and local data
 /*.json
+settings*.json
+live-before-*.json
 *.lgs
 *.jar
 *.log

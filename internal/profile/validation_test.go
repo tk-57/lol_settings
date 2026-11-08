@@ -81,3 +81,45 @@ func TestInvalidSavePreservesPreviousFile(t *testing.T) {
 		}
 	}
 }
+
+func TestNullBindingRoundtrip(t *testing.T) {
+	p, err := Parse([]byte(`{"inputSettings":{"GameEvents":{"optionalBinding":null,"evtCastSpell1":"[q]"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := Save(path, p); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, exists := loaded.Input["GameEvents"]["optionalBinding"]
+	if !exists || value != nil || loaded.Input["GameEvents"]["evtCastSpell1"] != "[q]" {
+		t.Fatalf("bindings were not preserved: %#v", loaded.Input)
+	}
+	if !Matches(p.Input, loaded.Input) || !Matches(loaded.Input, p.Input) {
+		t.Fatal("null binding does not match after roundtrip")
+	}
+	if plan := MakePlan(p, loaded); plan.Changed != 0 || len(plan.Skipped) != 0 {
+		t.Fatalf("unchanged null binding affected plan: %#v", plan)
+	}
+}
+
+func TestNullBindingsDoNotOverwriteTypedSettings(t *testing.T) {
+	for _, values := range [][2]any{{nil, "[v]"}, {"[v]", nil}} {
+		source := &Profile{Game: Settings{"General": {"optionalSetting": values[0]}}}
+		current := &Profile{Game: Settings{"General": {"optionalSetting": values[1]}}}
+		plan := MakePlan(source, current)
+		if plan.Changed != 0 || len(plan.Skipped) != 1 {
+			t.Fatalf("null/type transition was not skipped: %#v", plan)
+		}
+		if Matches(source.Game, current.Game) {
+			t.Fatal("null matched a typed value")
+		}
+	}
+	if Matches(Settings{"GameEvents": {"optionalBinding": nil}}, Settings{}) {
+		t.Fatal("null matched a missing key")
+	}
+}

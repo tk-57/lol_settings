@@ -143,7 +143,7 @@ func (app *application) exportProfile() {
 				return
 			}
 			app.logLine("保存しました: " + path)
-			app.message("現在の設定を保存しました。\n別アカウントにログイン後、再接続してこのファイルを開いてください。", "保存完了", 0x40)
+			app.message("保存しました。", "保存完了", 0x40)
 		}
 	})
 }

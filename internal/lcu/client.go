@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -213,9 +214,10 @@ func (c *Client) Snapshot(a Account) (*profile.Profile, error) {
 
 // Prepared captures the account and settings shown by the confirmation step.
 type Prepared struct {
-	Before  *profile.Profile
-	Plan    *profile.Plan
-	Account Account
+	Before      *profile.Profile
+	Plan        *profile.Plan
+	Account     Account
+	voiceBefore *voicePreferences
 }
 
 // Prepare computes changes without writing to the client.
@@ -224,7 +226,18 @@ func (c *Client) Prepare(a Account, p *profile.Profile) (*Prepared, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Prepared{Before: before, Plan: profile.MakePlan(p, before), Account: a}, nil
+	prepared := &Prepared{Before: before, Plan: profile.MakePlan(p, before), Account: a}
+	game := profile.WithChanges(before.Game, prepared.Plan.Game)
+	if len(voiceChanges(prepared.Plan.Input, game)) > 0 {
+		prepared.voiceBefore, err = c.voicePreferences()
+		if err != nil {
+			return nil, err
+		}
+		if err := c.guard(a); err != nil {
+			return nil, err
+		}
+	}
+	return prepared, nil
 }
 
 // Apply rejects stale confirmations and verifies each write by reading it back.
@@ -246,10 +259,32 @@ func (c *Client) Apply(p *Prepared) (err error) {
 	if !profile.Matches(p.Before.Game, current.Game) || !profile.Matches(current.Game, p.Before.Game) || !profile.Matches(p.Before.Input, current.Input) || !profile.Matches(current.Input, p.Before.Input) {
 		return fmt.Errorf("確認後に設定が変わりました。もう一度適用内容を確認してください")
 	}
+	game := profile.WithChanges(current.Game, p.Plan.Game)
+	voice := voiceChanges(p.Plan.Input, game)
+	if len(voice) > 0 {
+		if p.voiceBefore == nil {
+			return fmt.Errorf("通話キーの適用内容をもう一度確認してください")
+		}
+		actual, e := c.voicePreferences()
+		if e != nil {
+			return e
+		}
+		if !sameVoiceFields(p.voiceBefore.Data, actual.Data, voice) {
+			return fmt.Errorf("確認後に通話キーが変わりました。もう一度適用内容を確認してください")
+		}
+	}
+	// Clear changed bindings before assigning new keys. Verify the full input
+	// snapshot afterwards, since assigning a key can affect another binding.
+	unbinds := profile.InputUnbinds(p.Plan.Input, current.Input)
 	for _, part := range []struct {
 		path string
 		data profile.Settings
-	}{{gameEndpoint, p.Plan.Game}, {inputEndpoint, p.Plan.Input}} {
+		want profile.Settings
+	}{
+		{gameEndpoint, p.Plan.Game, p.Plan.Game},
+		{inputEndpoint, unbinds, unbinds},
+		{inputEndpoint, p.Plan.Input, profile.WithChanges(current.Input, p.Plan.Input)},
+	} {
 		if len(part.data) == 0 {
 			continue
 		}
@@ -257,6 +292,16 @@ func (c *Client) Apply(p *Prepared) (err error) {
 			return err
 		}
 		wrote = true
+		if part.path == inputEndpoint {
+			if updates := voiceChanges(part.data, game); len(updates) > 0 {
+				if err = c.updateVoiceBindings(p.Account, updates); err != nil {
+					return err
+				}
+				if err = c.guard(p.Account); err != nil {
+					return err
+				}
+			}
+		}
 		if _, err = c.request("PATCH", part.path, part.data); err != nil {
 			return err
 		}
@@ -271,12 +316,54 @@ func (c *Client) Apply(p *Prepared) (err error) {
 		if e != nil {
 			return e
 		}
-		if !profile.Matches(part.data, actual) {
-			return fmt.Errorf("%s: 書き込み後の値が一致しません。一部が拒否・補正された可能性があります", part.path)
+		if e := verifySettings(part.path, part.want, actual); e != nil {
+			return e
 		}
 	}
 	if err = c.guard(p.Account); err != nil {
 		return err
 	}
 	return nil
+}
+
+func verifySettings(path string, wanted, actual profile.Settings) error {
+	var differences []string
+	for section, entries := range wanted {
+		for key, value := range entries {
+			got, exists := actual[section][key]
+			same := profile.SameValue(value, got)
+			if path == inputEndpoint {
+				same = profile.SameInputValue(section, value, got)
+			}
+			if exists && same {
+				continue
+			}
+			expectedText := settingText(value)
+			actualText := "項目なし"
+			if exists {
+				actualText = settingText(got)
+			}
+			differences = append(differences, fmt.Sprintf("%s.%s: 指定 %s → 実際 %s", section, key, expectedText, actualText))
+		}
+	}
+	if len(differences) == 0 {
+		return nil
+	}
+	sort.Strings(differences)
+	count := len(differences)
+	if count > 8 {
+		differences = append(differences[:8], fmt.Sprintf("ほか %d 項目", count-8))
+	}
+	return fmt.Errorf("%s: %d 項目が指定どおりに反映されませんでした。\n%s", path, count, strings.Join(differences, "\n"))
+}
+
+func settingText(value any) string {
+	if s, ok := value.(string); ok {
+		if len([]rune(s)) > 80 {
+			s = string([]rune(s)[:80]) + "…"
+		}
+		return strconv.Quote(s)
+	}
+	b, _ := json.Marshal(value)
+	return string(b)
 }
